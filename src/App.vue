@@ -1,10 +1,22 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { courseForLesson, exportRecords, lessonById, persist, saveAttempt, setDownloaded, state, updateTokenClassification } from './store';
-import type { ErrorCategory, Lesson, PracticeAttempt, PracticeView } from './types';
+import {
+  courseForLesson,
+  deletePracticeSheet,
+  exportRecords,
+  lessonById,
+  persist,
+  practiceSheetById,
+  resolveSheetItem,
+  saveAttempt,
+  setDownloaded,
+  state,
+  updateTokenClassification
+} from './store';
+import type { ErrorCategory, Lesson, PracticeAttempt, PracticeSheet, PracticeSheetItem, PracticeView, Sentence } from './types';
 import { compareSentence, scoreAttempt, segmentText } from './utils';
 
-const view = ref<PracticeView>(state.activeLessonId ? 'practice' : 'library');
+const view = ref<PracticeView>(state.activeSheetId || state.activeLessonId ? 'practice' : 'library');
 const online = ref(navigator.onLine);
 const toast = ref('');
 const resultAttemptId = ref('');
@@ -13,25 +25,85 @@ const segmentStart = ref(0);
 const segmentEnd = ref(1);
 const teacherAttemptId = ref(state.attempts[0]?.id ?? '');
 const teacherDraft = ref(state.attempts[0]?.teacherFeedback ?? '');
+const sheetEditorOpen = ref(false);
+const editingSheetId = ref('');
+const sheetName = ref('');
+const selectedItemKeys = ref<string[]>([]);
+const editorItems = ref<PracticeSheetItem[]>([]);
 let toastTimer = 0;
 
-const activeLesson = computed(() => lessonById(state.activeLessonId));
-const activeCourse = computed(() => activeLesson.value ? courseForLesson(activeLesson.value.id) : undefined);
-const currentSentence = computed(() => {
+interface PracticeEntry {
+  key: string;
+  itemId: string;
+  courseId: string;
+  lessonId: string;
+  sentenceId: string;
+  courseTitle: string;
+  lesson: Lesson;
+  sentence: Sentence;
+}
+
+const isSheetMode = computed(() => !!state.activeSheetId);
+const activeSheet = computed(() => practiceSheetById(state.activeSheetId));
+const sheetEntries = computed<PracticeEntry[]>(() => {
+  if (!activeSheet.value) return [];
+  return activeSheet.value.items
+    .map((item) => {
+      const resolved = resolveSheetItem(item);
+      if (!resolved) return undefined;
+      return {
+        key: item.itemId,
+        itemId: item.itemId,
+        courseId: item.courseId,
+        lessonId: item.lessonId,
+        sentenceId: item.sentenceId,
+        courseTitle: resolved.course.title,
+        lesson: resolved.lesson,
+        sentence: resolved.sentence
+      };
+    })
+    .filter((item): item is PracticeEntry => !!item);
+});
+const activeLesson = computed(() => isSheetMode.value ? undefined : lessonById(state.activeLessonId));
+const activeCourse = computed(() => {
+  if (activeSheet.value) return undefined;
+  return activeLesson.value ? courseForLesson(activeLesson.value.id) : undefined;
+});
+const activeEntries = computed<PracticeEntry[]>(() => {
   const lesson = activeLesson.value;
-  if (!lesson) return undefined;
-  return lesson.sentences.find((sentence) => sentence.id === state.activeSentenceId) ?? lesson.sentences[0];
+  if (!lesson) return sheetEntries.value;
+  const course = activeCourse.value;
+  return lesson.sentences.map((sentence) => ({
+    key: sentence.id,
+    itemId: sentence.id,
+    courseId: lesson.courseId,
+    lessonId: lesson.id,
+    sentenceId: sentence.id,
+    courseTitle: course?.title ?? '',
+    lesson,
+    sentence
+  }));
 });
+const currentEntry = computed(() => {
+  const entries = activeEntries.value;
+  const currentId = isSheetMode.value
+    ? state.sheetDrafts[state.activeSheetId]?.activeItemId
+    : state.activeSentenceId;
+  return entries.find((entry) => entry.itemId === currentId) ?? entries[0];
+});
+const currentSentence = computed(() => currentEntry.value?.sentence);
 const activeProgress = computed(() => activeLesson.value ? state.progress[activeLesson.value.id] : undefined);
+const activeSheetDraft = computed(() => activeSheet.value ? state.sheetDrafts[activeSheet.value.id] : undefined);
 const currentAnswer = ref('');
-const currentIndex = computed(() => {
-  if (!activeLesson.value || !currentSentence.value) return 0;
-  return activeLesson.value.sentences.findIndex((item) => item.id === currentSentence.value?.id);
-});
-const lessonCompletion = computed(() => {
-  if (!activeLesson.value || !activeProgress.value) return 0;
-  const answered = activeLesson.value.sentences.filter((sentence) => (activeProgress.value?.answers[sentence.id] ?? '').trim()).length;
-  return Math.round((answered / activeLesson.value.sentences.length) * 100);
+const currentIndex = computed(() => activeEntries.value.findIndex((entry) => entry.itemId === currentEntry.value?.itemId));
+const practiceCompletion = computed(() => {
+  const entries = activeEntries.value;
+  if (!entries.length) return 0;
+  const answered = entries.filter((entry) => {
+    if (isSheetMode.value) return (activeSheetDraft.value?.answersByItem[entry.itemId] ?? '').trim();
+    return (activeProgress.value?.answers[entry.sentenceId] ?? '').trim();
+  }).length;
+  return Math.round((answered / entries.length) * 100);
 });
 const resultAttempt = computed(() => state.attempts.find((attempt) => attempt.id === resultAttemptId.value));
 const resultSentence = computed(() => resultAttempt.value?.sentenceAttempts[selectedResultSentence.value]);
@@ -48,32 +120,52 @@ const categoryOptions: Array<{ value: ErrorCategory; label: string }> = [
   { value: 'grammar', label: '语法' }
 ];
 
-watch(currentSentence, (sentence) => {
-  currentAnswer.value = sentence && activeProgress.value ? activeProgress.value.answers[sentence.id] ?? '' : '';
+const sheetSentenceOptions = computed(() => state.courses.flatMap((course) =>
+  course.lessons.flatMap((lesson) =>
+    lesson.sentences.map((sentence) => ({
+      key: `${course.id}__${lesson.id}__${sentence.id}`,
+      course,
+      lesson,
+      sentence
+    }))
+  )
+));
+
+function sheetItemKey(item: Pick<PracticeSheetItem, 'courseId' | 'lessonId' | 'sentenceId'>) {
+  return `${item.courseId}__${item.lessonId}__${item.sentenceId}`;
+}
+
+function answerForEntry(entry: PracticeEntry): string {
+  if (isSheetMode.value && activeSheet.value) {
+    return state.sheetDrafts[activeSheet.value.id]?.answersByItem[entry.itemId] ?? '';
+  }
+  return state.progress[entry.lessonId]?.answers[entry.sentenceId] ?? '';
+}
+
+watch(currentEntry, (entry) => {
+  currentAnswer.value = entry ? answerForEntry(entry) : '';
   segmentStart.value = 0;
-  segmentEnd.value = sentence ? Math.max(0, segmentText(sentence.text).length - 1) : 0;
+  segmentEnd.value = entry ? Math.max(0, segmentText(entry.sentence.text).length - 1) : 0;
 }, { immediate: true });
 
 watch(currentAnswer, (value) => {
-  const lesson = activeLesson.value;
-  const sentence = currentSentence.value;
-  if (!lesson || !sentence) return;
-  const progress = state.progress[lesson.id] ?? { answers: {}, activeSentenceId: sentence.id, updatedAt: new Date().toISOString() };
-  progress.answers[sentence.id] = value;
-  progress.activeSentenceId = sentence.id;
-  progress.updatedAt = new Date().toISOString();
-  state.progress[lesson.id] = progress;
-});
-
-watch(activeLesson, (lesson) => {
-  if (!lesson) return;
-  state.activeLessonId = lesson.id;
-  state.activeSentenceId = currentSentence.value?.id ?? lesson.sentences[0].id;
-  const progress = state.progress[lesson.id] ?? { answers: {}, activeSentenceId: lesson.sentences[0].id, updatedAt: new Date().toISOString() };
-  if (!lesson.sentences.some((sentence) => sentence.id === progress.activeSentenceId)) progress.activeSentenceId = lesson.sentences[0].id;
-  state.progress[lesson.id] = progress;
-  state.activeSentenceId = progress.activeSentenceId;
-  currentAnswer.value = progress.answers[state.activeSentenceId] ?? '';
+  const sheet = activeSheet.value;
+  const entry = currentEntry.value;
+  if (!entry) return;
+  const now = new Date().toISOString();
+  if (sheet) {
+    const draft = state.sheetDrafts[sheet.id] ?? { answersByItem: {}, activeItemId: entry.itemId, updatedAt: now };
+    draft.answersByItem[entry.itemId] = value;
+    draft.activeItemId = entry.itemId;
+    draft.updatedAt = now;
+    state.sheetDrafts[sheet.id] = draft;
+    return;
+  }
+  const progress = state.progress[entry.lessonId] ?? { answers: {}, activeSentenceId: entry.sentenceId, updatedAt: now };
+  progress.answers[entry.sentenceId] = value;
+  progress.activeSentenceId = entry.sentenceId;
+  progress.updatedAt = now;
+  state.progress[entry.lessonId] = progress;
 });
 
 watch(teacherAttemptId, (id) => {
@@ -88,51 +180,204 @@ function notify(message: string) {
 
 function startLesson(lesson: Lesson) {
   const progress = state.progress[lesson.id] ?? { answers: {}, activeSentenceId: lesson.sentences[0].id, updatedAt: new Date().toISOString() };
+  if (!lesson.sentences.some((sentence) => sentence.id === progress.activeSentenceId)) progress.activeSentenceId = lesson.sentences[0].id;
   state.progress[lesson.id] = progress;
   state.activeLessonId = lesson.id;
-  state.activeSentenceId = progress.activeSentenceId || lesson.sentences[0].id;
+  state.activeSheetId = '';
+  state.activeSentenceId = progress.activeSentenceId;
   currentAnswer.value = progress.answers[state.activeSentenceId] ?? '';
   view.value = 'practice';
   persist();
 }
 
-function goToSentence(index: number) {
-  const lesson = activeLesson.value;
-  if (!lesson || !lesson.sentences[index]) return;
-  const target = lesson.sentences[index];
-  state.activeSentenceId = target.id;
-  const progress = state.progress[lesson.id];
-  if (progress) {
-    progress.activeSentenceId = target.id;
-    progress.updatedAt = new Date().toISOString();
+function startSheet(sheet: PracticeSheet) {
+  if (!sheet.items.length) {
+    notify('这份练习单还没有句子');
+    return;
   }
-  currentAnswer.value = progress?.answers[target.id] ?? '';
+  const firstItemId = sheet.items[0]?.itemId ?? '';
+  const draft = state.sheetDrafts[sheet.id] ?? { answersByItem: {}, activeItemId: firstItemId, updatedAt: new Date().toISOString() };
+  if (!sheet.items.some((item) => item.itemId === draft.activeItemId)) draft.activeItemId = firstItemId;
+  state.sheetDrafts[sheet.id] = draft;
+  state.activeSheetId = sheet.id;
+  state.activeLessonId = '';
+  state.activeSentenceId = '';
+  currentAnswer.value = draft.answersByItem[draft.activeItemId] ?? '';
+  view.value = 'practice';
+  persist();
+}
+
+function openSheetEditor(sheet?: PracticeSheet) {
+  editingSheetId.value = sheet?.id ?? '';
+  sheetName.value = sheet?.name ?? '';
+  editorItems.value = sheet ? sheet.items.map((item) => ({ ...item })) : [];
+  selectedItemKeys.value = editorItems.value.map(sheetItemKey);
+  sheetEditorOpen.value = true;
+}
+
+function closeSheetEditor() {
+  sheetEditorOpen.value = false;
+  editingSheetId.value = '';
+  sheetName.value = '';
+  selectedItemKeys.value = [];
+  editorItems.value = [];
+}
+
+function toggleSheetSentence(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const option = sheetSentenceOptions.value.find((item) => item.key === select.value);
+  select.value = '';
+  if (!option) return;
+  const existing = editorItems.value.find((item) => sheetItemKey(item) === option.key);
+  if (existing) {
+    notify('这个句子已在练习单中');
+    return;
+  }
+  editorItems.value.push({
+    itemId: `sheet-item-${option.course.id}-${option.lesson.id}-${option.sentence.id}`,
+    courseId: option.course.id,
+    lessonId: option.lesson.id,
+    sentenceId: option.sentence.id
+  });
+  selectedItemKeys.value = editorItems.value.map(sheetItemKey);
+}
+
+function toggleSelectedSentence(key: string) {
+  if (selectedItemKeys.value.includes(key)) {
+    editorItems.value = editorItems.value.filter((item) => sheetItemKey(item) !== key);
+  } else {
+    const option = sheetSentenceOptions.value.find((item) => item.key === key);
+    if (!option) return;
+    editorItems.value.push({
+      itemId: `sheet-item-${option.course.id}-${option.lesson.id}-${option.sentence.id}`,
+      courseId: option.course.id,
+      lessonId: option.lesson.id,
+      sentenceId: option.sentence.id
+    });
+  }
+  selectedItemKeys.value = editorItems.value.map(sheetItemKey);
+}
+
+function moveEditorItem(index: number, delta: number) {
+  const target = index + delta;
+  if (target < 0 || target >= editorItems.value.length) return;
+  const items = [...editorItems.value];
+  [items[index], items[target]] = [items[target], items[index]];
+  editorItems.value = items;
+}
+
+function removeEditorItem(index: number) {
+  editorItems.value = editorItems.value.filter((_, itemIndex) => itemIndex !== index);
+  selectedItemKeys.value = editorItems.value.map(sheetItemKey);
+}
+
+function saveSheet() {
+  const name = sheetName.value.trim();
+  if (!name) {
+    notify('请先填写练习单名称');
+    return;
+  }
+  if (!editorItems.value.length) {
+    notify('请至少勾选一个句子');
+    return;
+  }
+  const now = new Date().toISOString();
+  const existing = editingSheetId.value ? state.practiceSheets.find((sheet) => sheet.id === editingSheetId.value) : undefined;
+  const sheet: PracticeSheet = {
+    id: existing?.id ?? `sheet-${Date.now()}`,
+    name,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    items: editorItems.value.map((item) => ({ ...item }))
+  };
+  if (existing) {
+    Object.assign(existing, sheet);
+    const draft = state.sheetDrafts[sheet.id];
+    if (draft) {
+      const validItemIds = new Set(sheet.items.map((item) => item.itemId));
+      draft.answersByItem = Object.fromEntries(Object.entries(draft.answersByItem).filter(([itemId]) => validItemIds.has(itemId)));
+      if (!validItemIds.has(draft.activeItemId)) draft.activeItemId = sheet.items[0]?.itemId ?? '';
+      draft.updatedAt = now;
+    }
+  } else {
+    state.practiceSheets.unshift(sheet);
+  }
+  closeSheetEditor();
+  persist();
+  notify('专项练习单已保存');
+}
+
+function removeSheet(sheet: PracticeSheet) {
+  const draftCount = Object.values(state.sheetDrafts[sheet.id]?.answersByItem ?? {}).filter((answer) => answer.trim()).length;
+  const attemptCount = state.attempts.filter((attempt) => attempt.kind === 'sheet' && attempt.sheetId === sheet.id).length;
+  const message = `撤掉「${sheet.name}」只会删除这份练习单自己的${draftCount ? `草稿（${draftCount} 句）` : '草稿'}和${attemptCount ? `作答（${attemptCount} 条）` : '作答'}，原课程记录保留。确定吗？`;
+  if (!window.confirm(message)) return;
+  deletePracticeSheet(sheet.id);
+  if (view.value === 'practice' && state.activeSheetId === sheet.id) {
+    state.activeSheetId = '';
+    view.value = 'library';
+  }
+  if (resultAttemptId.value && state.attempts.every((attempt) => attempt.id !== resultAttemptId.value)) {
+    resultAttemptId.value = '';
+    view.value = 'library';
+  }
+  persist();
+  notify('练习单已撤掉，原课程记录未受影响');
+}
+
+function goToSentence(index: number) {
+  const entry = activeEntries.value[index];
+  if (!entry) return;
+  const now = new Date().toISOString();
+  if (isSheetMode.value && activeSheet.value) {
+    const draft = state.sheetDrafts[activeSheet.value.id] ?? { answersByItem: {}, activeItemId: entry.itemId, updatedAt: now };
+    draft.activeItemId = entry.itemId;
+    draft.updatedAt = now;
+    state.sheetDrafts[activeSheet.value.id] = draft;
+  } else {
+    state.activeSentenceId = entry.sentenceId;
+    const progress = state.progress[entry.lessonId];
+    if (progress) {
+      progress.activeSentenceId = entry.sentenceId;
+      progress.updatedAt = now;
+    }
+  }
+  currentAnswer.value = answerForEntry(entry);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function submitLesson() {
-  const lesson = activeLesson.value;
-  const course = activeCourse.value;
-  if (!lesson || !course) return;
-  const progress = state.progress[lesson.id];
-  const answeredCount = lesson.sentences.filter((sentence) => (progress?.answers[sentence.id] ?? '').trim()).length;
+  const entries = activeEntries.value;
+  const sheet = activeSheet.value;
+  if (!entries.length) return;
+  const answeredCount = entries.filter((entry) => answerForEntry(entry).trim()).length;
   if (!answeredCount) {
     notify('请至少输入一句话再提交');
     return;
   }
-  if (answeredCount < lesson.sentences.length && !window.confirm(`还有 ${lesson.sentences.length - answeredCount} 句未作答，仍然提交吗？`)) return;
-  const sentenceAttempts = lesson.sentences.map((sentence) => {
-    const source = sentence.text;
-    const answer = progress?.answers[sentence.id] ?? '';
+  if (answeredCount < entries.length && !window.confirm(`还有 ${entries.length - answeredCount} 句未作答，仍然提交吗？`)) return;
+  const sentenceAttempts = entries.map((entry) => {
+    const source = entry.sentence.text;
+    const answer = answerForEntry(entry);
     const tokens = compareSentence(source, answer);
     const correct = tokens.filter((token) => token.correct).length;
-    return { sentenceId: sentence.id, source, answer, tokens, score: tokens.length ? Math.round((correct / tokens.length) * 100) : 0 };
+    return {
+      sentenceId: entry.sentenceId,
+      itemId: sheet ? entry.itemId : undefined,
+      source,
+      answer,
+      tokens,
+      score: tokens.length ? Math.round((correct / tokens.length) * 100) : 0
+    };
   });
   const attempt: PracticeAttempt = {
     id: `attempt-${Date.now()}`,
-    lessonId: lesson.id,
-    lessonTitle: lesson.title,
-    courseTitle: course.title,
+    kind: sheet ? 'sheet' : 'lesson',
+    sheetId: sheet?.id,
+    sheetName: sheet?.name,
+    lessonId: sheet ? '' : entries[0]?.lessonId ?? '',
+    lessonTitle: sheet ? sheet.name : entries[0]?.lesson.title ?? '',
+    courseTitle: sheet ? '专项练习单' : entries[0]?.courseTitle ?? '',
     submittedAt: new Date().toISOString(),
     score: scoreAttempt(sentenceAttempts),
     sentenceAttempts,
@@ -177,8 +422,8 @@ function selectResultSentence(index: number) {
   syncSegment();
 }
 
-function saveClassification(attemptId: string, sentenceId: string, tokenIndex: number, category: ErrorCategory, reason: string) {
-  updateTokenClassification(attemptId, sentenceId, tokenIndex, { category, reason });
+function saveClassification(attemptId: string, sentenceId: string, tokenIndex: number, category: ErrorCategory, reason: string, itemId?: string) {
+  updateTokenClassification(attemptId, sentenceId, tokenIndex, { category, reason }, itemId);
   persist();
 }
 
@@ -211,6 +456,27 @@ function downloadRecords() {
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function resumeResultAttempt() {
+  const attempt = resultAttempt.value;
+  if (!attempt) return;
+  if (attempt.kind === 'sheet' && attempt.sheetId) {
+    const sheet = practiceSheetById(attempt.sheetId);
+    if (sheet) {
+      startSheet(sheet);
+      return;
+    }
+    notify('这份练习单已撤掉，不能继续它的草稿');
+    view.value = 'library';
+    return;
+  }
+  const lesson = lessonById(attempt.lessonId);
+  if (lesson) startLesson(lesson);
+}
+
+function attemptLabel(attempt: PracticeAttempt): string {
+  return `${attempt.kind === 'sheet' ? '专项 · ' : ''}${attempt.lessonTitle} · ${attempt.score} 分 · ${formatDate(attempt.submittedAt)}`;
 }
 
 function onConnectionChange() {
@@ -291,6 +557,72 @@ onBeforeUnmount(() => {
           </div>
         </article>
 
+        <div class="section-head">
+          <h3>专项练习单</h3>
+          <var-button type="primary" size="small" @click="openSheetEditor()">新建练习单</var-button>
+        </div>
+
+        <template v-if="state.practiceSheets.length">
+          <article v-for="sheet in state.practiceSheets" :key="sheet.id" class="panel sheet-card">
+            <div class="history-top">
+              <div>
+                <strong>{{ sheet.name }}</strong>
+                <p>{{ sheet.items.length }} 句 · 更新于 {{ formatDate(sheet.updatedAt) }}</p>
+              </div>
+              <span class="level-badge">专项</span>
+            </div>
+            <div class="sheet-actions">
+              <var-button type="primary" size="small" @click="startSheet(sheet)">开始</var-button>
+              <var-button size="small" variant="outline" @click="openSheetEditor(sheet)">编辑</var-button>
+              <var-button size="small" color="#d83b45" text-color="#d83b45" variant="outline" @click="removeSheet(sheet)">撤掉</var-button>
+            </div>
+          </article>
+        </template>
+        <div v-else class="panel empty-state"><strong>还没有专项练习单</strong>从课程库勾选常错句，可跨课节调整听写顺序。</div>
+
+        <section v-if="sheetEditorOpen" class="panel sheet-editor">
+          <div class="detail-head">
+            <div><h3>{{ editingSheetId ? '编辑专项练习单' : '新建专项练习单' }}</h3><p>勾选句子后，按右侧顺序逐句听写。</p></div>
+          </div>
+          <label class="editor-field"><span>练习单名称</span><input v-model="sheetName" placeholder="如：机场与会议高频错句" /></label>
+
+          <label class="editor-field"><span>从课程库添加句子</span>
+            <select value="" @change="toggleSheetSentence">
+              <option value="" disabled>选择要加入的句子</option>
+              <option v-for="option in sheetSentenceOptions" :key="option.key" :value="option.key" :disabled="selectedItemKeys.includes(option.key)">
+                {{ option.course.title }} / {{ option.lesson.title }} / {{ option.sentence.text }}
+              </option>
+            </select>
+          </label>
+
+          <div class="dictation-label"><strong>课程库句子</strong><span>勾选后加入练习单</span></div>
+          <div class="sentence-check-list">
+            <label v-for="option in sheetSentenceOptions" :key="`check-${option.key}`" class="sentence-check">
+              <input type="checkbox" :checked="selectedItemKeys.includes(option.key)" @change="toggleSelectedSentence(option.key)" />
+              <span><strong>{{ option.lesson.title }}</strong>{{ option.sentence.text }}</span>
+            </label>
+          </div>
+
+          <div v-if="editorItems.length" class="dictation-label"><strong>听写顺序</strong><span>{{ editorItems.length }} 句</span></div>
+          <div v-for="(item, index) in editorItems" :key="item.itemId" class="ordered-sentence">
+            <span>{{ index + 1 }}</span>
+            <div>
+              <strong>{{ resolveSheetItem(item)?.lesson.title }}</strong>
+              <p>{{ resolveSheetItem(item)?.sentence.text }}</p>
+            </div>
+            <div class="order-buttons">
+              <button type="button" aria-label="上移" :disabled="index === 0" @click="moveEditorItem(index, -1)">↑</button>
+              <button type="button" aria-label="下移" :disabled="index === editorItems.length - 1" @click="moveEditorItem(index, 1)">↓</button>
+              <button type="button" aria-label="移除" @click="removeEditorItem(index)">×</button>
+            </div>
+          </div>
+
+          <div class="editor-actions">
+            <var-button block variant="outline" @click="closeSheetEditor">取消</var-button>
+            <var-button block type="primary" @click="saveSheet">保存练习单</var-button>
+          </div>
+        </section>
+
         <div class="section-head"><h3>最近练习</h3><span>{{ state.attempts.length }} 条记录</span></div>
         <article v-if="state.attempts.length" class="panel">
           <div v-for="attempt in state.attempts.slice(0, 4)" :key="attempt.id" class="history-card">
@@ -302,16 +634,16 @@ onBeforeUnmount(() => {
         <div v-else class="empty-state"><strong>还没有练习记录</strong>完成一次听写后，可在这里复核和导出。</div>
       </div>
 
-      <div v-else-if="view === 'practice' && activeLesson" class="page">
+      <div v-else-if="view === 'practice' && activeEntries.length" class="page">
         <header class="practice-header">
           <div class="practice-nav">
             <button class="back-button" aria-label="返回课程库" @click="view = 'library'">‹</button>
-            <div><h2>{{ activeLesson.title }}</h2></div>
+            <div><h2>{{ activeSheet ? activeSheet.name : activeLesson?.title }}</h2></div>
             <span class="status-chip">{{ online ? '在线' : '离线' }}</span>
           </div>
           <div class="progress-line">
-            <div class="sentence-count"><span>第 {{ currentIndex + 1 }} / {{ activeLesson.sentences.length }} 句</span><span>{{ lessonCompletion }}% 已填写</span></div>
-            <var-progress :value="lessonCompletion" color="#1769e0" />
+            <div class="sentence-count"><span>第 {{ currentIndex + 1 }} / {{ activeEntries.length }} 句</span><span>{{ practiceCompletion }}% 已填写</span></div>
+            <var-progress :value="practiceCompletion" color="#1769e0" />
           </div>
         </header>
 
@@ -320,6 +652,7 @@ onBeforeUnmount(() => {
             <button class="play-button" aria-label="播放当前句子" @click="replay(currentSentence?.text ?? '')">▶</button>
             <div><strong>听写提示</strong><p>先完整播放，再输入你听到的英文。播放速度已放慢。</p></div>
           </div>
+          <p v-if="currentEntry" class="audio-source">{{ currentEntry.courseTitle }} / {{ currentEntry.lesson.title }}</p>
         </section>
 
         <div class="dictation-label"><strong>输入听到的内容</strong><span>答案在本机自动保存</span></div>
@@ -330,7 +663,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="sentence-picker" aria-label="句子导航">
-          <button v-for="(sentence, index) in activeLesson.sentences" :key="sentence.id" class="sentence-dot" :class="{ active: sentence.id === currentSentence?.id, done: !!activeProgress?.answers[sentence.id] }" :aria-label="`跳到第 ${index + 1} 句`" @click="goToSentence(index)">{{ index + 1 }}</button>
+          <button v-for="(entry, index) in activeEntries" :key="entry.key" class="sentence-dot" :class="{ active: entry.itemId === currentEntry?.itemId, done: !!answerForEntry(entry) }" :aria-label="`跳到第 ${index + 1} 句`" @click="goToSentence(index)">{{ index + 1 }}</button>
         </div>
 
         <section v-if="currentSentence" class="panel">
@@ -353,7 +686,7 @@ onBeforeUnmount(() => {
         </section>
 
         <div class="sentence-picker">
-          <button v-for="(attempt, index) in resultAttempt.sentenceAttempts" :key="attempt.sentenceId" class="sentence-dot" :class="{ active: index === selectedResultSentence }" @click="selectResultSentence(index)">{{ index + 1 }}</button>
+          <button v-for="(attempt, index) in resultAttempt.sentenceAttempts" :key="`${attempt.itemId ?? attempt.sentenceId}-${index}`" class="sentence-dot" :class="{ active: index === selectedResultSentence }" @click="selectResultSentence(index)">{{ index + 1 }}</button>
         </div>
 
         <section v-if="resultSentence" class="panel token-panel">
@@ -381,17 +714,17 @@ onBeforeUnmount(() => {
             <div v-for="token in resultSentence.tokens.filter((item) => !item.correct)" :key="`edit-${token.index}`" class="feedback-card">
               <strong>{{ token.expected || `多出的词：${token.actual}` }}</strong>
               <div style="display: grid; grid-template-columns: 120px 1fr; gap: 8px; margin-top: 9px">
-                <select :value="token.category" @change="saveClassification(resultAttempt.id, resultSentence.sentenceId, token.index, ($event.target as HTMLSelectElement).value as ErrorCategory, token.reason)">
+                <select :value="token.category" @change="saveClassification(resultAttempt.id, resultSentence.sentenceId, token.index, ($event.target as HTMLSelectElement).value as ErrorCategory, token.reason, resultSentence.itemId)">
                   <option v-for="option in categoryOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
                 </select>
-                <input :value="token.reason" placeholder="记录原因，如连读、词尾未听清" @change="saveClassification(resultAttempt.id, resultSentence.sentenceId, token.index, token.category, ($event.target as HTMLInputElement).value)" />
+                <input :value="token.reason" placeholder="记录原因，如连读、词尾未听清" @change="saveClassification(resultAttempt.id, resultSentence.sentenceId, token.index, token.category, ($event.target as HTMLInputElement).value, resultSentence.itemId)" />
               </div>
             </div>
           </div>
         </section>
 
         <section v-if="resultAttempt.teacherFeedback" class="panel"><div class="feedback-card"><strong>教师反馈</strong><p>{{ resultAttempt.teacherFeedback }}</p></div></section>
-        <var-button block type="primary" @click="startLesson(activeLesson!)">返回本次课程</var-button>
+        <var-button block type="primary" @click="resumeResultAttempt">返回本次{{ resultAttempt.kind === 'sheet' ? '练习单' : '课程' }}</var-button>
         <var-button block type="default" variant="outline" style="margin-top: 10px" @click="downloadRecords">导出练习记录</var-button>
       </div>
 
@@ -404,7 +737,7 @@ onBeforeUnmount(() => {
         <div v-if="state.attempts.length" class="panel">
           <div class="dictation-label"><strong>选择一次作答</strong><span>{{ state.attempts.length }} 条</span></div>
           <var-select v-model="teacherAttemptId" placeholder="选择作答">
-            <var-option v-for="attempt in state.attempts" :key="attempt.id" :label="`${attempt.lessonTitle} · ${attempt.score} 分 · ${formatDate(attempt.submittedAt)}`" :value="attempt.id" />
+            <var-option v-for="attempt in state.attempts" :key="attempt.id" :label="attemptLabel(attempt)" :value="attempt.id" />
           </var-select>
           <template v-if="teacherAttempt">
             <div class="feedback-card"><strong>{{ teacherAttempt.courseTitle }}</strong><p>{{ teacherAttempt.lessonTitle }} · 总分 {{ teacherAttempt.score }}，完成 {{ teacherAttempt.sentenceAttempts.length }} 句。</p></div>

@@ -122,6 +122,27 @@ button, input, textarea { font: inherit; }
 .segmented button.active { background: var(--card); color: var(--text); box-shadow: 0 1px 5px rgb(0 0 0 / .09); font-weight: 700; }
 .empty-state { text-align: center; padding: 36px 20px; color: var(--muted); }
 .empty-state strong { display: block; color: var(--text); margin-bottom: 7px; }
+.sheet-card { padding: 14px 16px; }
+.sheet-card p { color: var(--muted); font-size: .7rem; margin: 5px 0 0; }
+.sheet-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.sheet-editor { border-color: color-mix(in srgb, var(--primary) 35%, var(--line)); }
+.editor-field { display: grid; gap: 7px; margin-top: 12px; font-size: .76rem; color: var(--muted); }
+.editor-field input, .editor-field select { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 10px 11px; background: var(--card); color: var(--text); }
+.sentence-check-list { max-height: 245px; overflow: auto; border: 1px solid var(--line); border-radius: 14px; padding: 6px; background: color-mix(in srgb, var(--card) 78%, var(--app-bg)); }
+.sentence-check { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 8px; align-items: start; padding: 9px 7px; border-bottom: 1px solid var(--line); font-size: .74rem; }
+.sentence-check:last-child { border-bottom: 0; }
+.sentence-check input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--primary); }
+.sentence-check strong { display: block; font-size: .72rem; margin-bottom: 3px; }
+.sentence-check span { color: var(--muted); line-height: 1.45; }
+.ordered-sentence { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 9px; align-items: center; background: var(--soft); border-radius: 13px; padding: 10px; margin-top: 8px; }
+.ordered-sentence > span { width: 28px; height: 28px; border-radius: 9px; background: var(--primary); color: white; display: grid; place-items: center; font-weight: 800; font-size: .72rem; }
+.ordered-sentence strong { display: block; font-size: .72rem; }
+.ordered-sentence p { margin: 3px 0 0; color: var(--muted); font-size: .68rem; line-height: 1.4; }
+.order-buttons { display: flex; gap: 4px; }
+.order-buttons button { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: var(--text); cursor: pointer; }
+.order-buttons button:disabled { opacity: .4; cursor: not-allowed; }
+.editor-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 15px; }
+.audio-source { position: relative; z-index: 1; margin: 14px 0 0; color: #bbc7d9; font-size: .68rem; }
 @media (min-width: 600px) {
   body { padding: 18px 0; }
   .app-shell { min-height: calc(100dvh - 36px); border-radius: 28px; }

@@ -67,9 +67,11 @@ export const demoCourses: Course[] = [
 export const createInitialState = (): PersistedState => ({
   schemaVersion: 1,
   courses: structuredClone(demoCourses),
+  practiceSheets: [],
   attempts: [
     {
       id: 'demo-attempt-1',
+      kind: 'lesson',
       lessonId: 'airport-01',
       lessonTitle: '办理值机',
       courseTitle: '日常英语 · 机场与出行',
@@ -106,7 +108,9 @@ export const createInitialState = (): PersistedState => ({
       updatedAt: '2026-09-24T10:10:00.000Z'
     }
   },
+  sheetDrafts: {},
   activeLessonId: '',
+  activeSheetId: '',
   activeSentenceId: '',
   theme: 'light',
   fontScale: 1,

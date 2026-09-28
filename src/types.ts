@@ -1,5 +1,6 @@
 export type ErrorCategory = 'unclassified' | 'spelling' | 'omitted' | 'extra' | 'punctuation' | 'grammar';
 export type PracticeView = 'library' | 'practice' | 'result' | 'teacher';
+export type PracticeKind = 'lesson' | 'sheet';
 export type ThemeMode = 'light' | 'dark';
 
 export interface Sentence {
@@ -29,6 +30,27 @@ export interface Course {
   lessons: Lesson[];
 }
 
+export interface PracticeSheetItem {
+  itemId: string;
+  courseId: string;
+  lessonId: string;
+  sentenceId: string;
+}
+
+export interface PracticeSheet {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  items: PracticeSheetItem[];
+}
+
+export interface SheetDraft {
+  answersByItem: Record<string, string>;
+  activeItemId: string;
+  updatedAt: string;
+}
+
 export interface TokenResult {
   index: number;
   expected: string;
@@ -40,6 +62,7 @@ export interface TokenResult {
 
 export interface SentenceAttempt {
   sentenceId: string;
+  itemId?: string;
   source: string;
   answer: string;
   tokens: TokenResult[];
@@ -48,6 +71,9 @@ export interface SentenceAttempt {
 
 export interface PracticeAttempt {
   id: string;
+  kind: PracticeKind;
+  sheetId?: string;
+  sheetName?: string;
   lessonId: string;
   lessonTitle: string;
   courseTitle: string;
@@ -66,9 +92,12 @@ export interface LessonProgress {
 export interface PersistedState {
   schemaVersion: 1;
   courses: Course[];
+  practiceSheets: PracticeSheet[];
   attempts: PracticeAttempt[];
   progress: Record<string, LessonProgress>;
+  sheetDrafts: Record<string, SheetDraft>;
   activeLessonId: string;
+  activeSheetId: string;
   activeSentenceId: string;
   theme: ThemeMode;
   fontScale: number;
