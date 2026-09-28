@@ -106,7 +106,9 @@ export const createInitialState = (): PersistedState => ({
       updatedAt: '2026-09-24T10:10:00.000Z'
     }
   },
+  practiceSheets: [],
   activeLessonId: '',
+  activeSheetId: '',
   activeSentenceId: '',
   theme: 'light',
   fontScale: 1,

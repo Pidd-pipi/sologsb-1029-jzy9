@@ -1,5 +1,5 @@
 export type ErrorCategory = 'unclassified' | 'spelling' | 'omitted' | 'extra' | 'punctuation' | 'grammar';
-export type PracticeView = 'library' | 'practice' | 'result' | 'teacher';
+export type PracticeView = 'library' | 'practice' | 'result' | 'teacher' | 'sheet-editor';
 export type ThemeMode = 'light' | 'dark';
 
 export interface Sentence {
@@ -18,6 +18,24 @@ export interface Lesson {
   estimatedMinutes: number;
   downloaded: boolean;
   sentences: Sentence[];
+}
+
+export interface PracticeSheetItem {
+  id: string;
+  sentenceId: string;
+  lessonId: string;
+  courseId: string;
+  text: string;
+  translation: string;
+  note: string;
+}
+
+export interface PracticeSheet {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  items: PracticeSheetItem[];
 }
 
 export interface Course {
@@ -40,6 +58,8 @@ export interface TokenResult {
 
 export interface SentenceAttempt {
   sentenceId: string;
+  originalSentenceId?: string;
+  practiceSheetItemId?: string;
   source: string;
   answer: string;
   tokens: TokenResult[];
@@ -49,6 +69,7 @@ export interface SentenceAttempt {
 export interface PracticeAttempt {
   id: string;
   lessonId: string;
+  practiceSheetId?: string;
   lessonTitle: string;
   courseTitle: string;
   submittedAt: string;
@@ -68,7 +89,9 @@ export interface PersistedState {
   courses: Course[];
   attempts: PracticeAttempt[];
   progress: Record<string, LessonProgress>;
+  practiceSheets: PracticeSheet[];
   activeLessonId: string;
+  activeSheetId: string;
   activeSentenceId: string;
   theme: ThemeMode;
   fontScale: number;

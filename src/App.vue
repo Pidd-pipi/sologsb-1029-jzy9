@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { courseForLesson, exportRecords, lessonById, persist, saveAttempt, setDownloaded, state, updateTokenClassification } from './store';
-import type { ErrorCategory, Lesson, PracticeAttempt, PracticeView } from './types';
+import { courseForLesson, deletePracticeSheet, exportRecords, isPracticeSheetLessonId, lessonById, persist, practiceSheetById, practiceSheetLessonId, saveAttempt, savePracticeSheet, setDownloaded, state, updateTokenClassification } from './store';
+import type { ErrorCategory, Lesson, PracticeAttempt, PracticeSheet, PracticeSheetItem, PracticeView } from './types';
 import { compareSentence, scoreAttempt, segmentText } from './utils';
 
 const view = ref<PracticeView>(state.activeLessonId ? 'practice' : 'library');
@@ -13,10 +13,15 @@ const segmentStart = ref(0);
 const segmentEnd = ref(1);
 const teacherAttemptId = ref(state.attempts[0]?.id ?? '');
 const teacherDraft = ref(state.attempts[0]?.teacherFeedback ?? '');
+const editingSheetId = ref('');
+const sheetName = ref('');
+const selectedSheetItemIds = ref<string[]>([]);
 let toastTimer = 0;
 
 const activeLesson = computed(() => lessonById(state.activeLessonId));
 const activeCourse = computed(() => activeLesson.value ? courseForLesson(activeLesson.value.id) : undefined);
+const activePracticeSheet = computed(() => state.activeSheetId ? practiceSheetById(state.activeSheetId) : undefined);
+const isActivePracticeSheet = computed(() => isPracticeSheetLessonId(state.activeLessonId));
 const currentSentence = computed(() => {
   const lesson = activeLesson.value;
   if (!lesson) return undefined;
@@ -47,6 +52,35 @@ const categoryOptions: Array<{ value: ErrorCategory; label: string }> = [
   { value: 'punctuation', label: '标点' },
   { value: 'grammar', label: '语法' }
 ];
+
+const sheetCandidates = computed(() => state.courses.flatMap((course) => course.lessons.flatMap((lesson) => lesson.sentences.map((sentence) => ({
+  itemId: `item-${sentence.id}`,
+  course,
+  lesson,
+  sentence
+})))));
+
+const editingSheet = computed(() => state.practiceSheets.find((sheet) => sheet.id === editingSheetId.value));
+const selectedSheetItems = computed<PracticeSheetItem[]>(() => {
+  const existingItems = editingSheet.value?.items ?? [];
+  return selectedSheetItemIds.value.map((itemId) => {
+    const existing = existingItems.find((item) => item.id === itemId);
+    if (existing) return existing;
+    const candidate = sheetCandidates.value.find((item) => item.itemId === itemId);
+    if (!candidate) {
+      return { id: itemId, sentenceId: itemId.replace(/^item-/, ''), lessonId: '', courseId: '', text: '原句子已不可用', translation: '', note: '' };
+    }
+    return {
+      id: candidate.itemId,
+      sentenceId: candidate.sentence.id,
+      lessonId: candidate.lesson.id,
+      courseId: candidate.course.id,
+      text: candidate.sentence.text,
+      translation: candidate.sentence.translation,
+      note: candidate.sentence.note
+    };
+  });
+});
 
 watch(currentSentence, (sentence) => {
   currentAnswer.value = sentence && activeProgress.value ? activeProgress.value.answers[sentence.id] ?? '' : '';
@@ -86,14 +120,85 @@ function notify(message: string) {
   toastTimer = window.setTimeout(() => { toast.value = ''; }, 2400);
 }
 
+function startNewSheet() {
+  editingSheetId.value = '';
+  sheetName.value = '';
+  selectedSheetItemIds.value = [];
+  view.value = 'sheet-editor';
+}
+
+function editSheet(sheet: PracticeSheet) {
+  editingSheetId.value = sheet.id;
+  sheetName.value = sheet.name;
+  selectedSheetItemIds.value = sheet.items.map((item) => item.id);
+  view.value = 'sheet-editor';
+}
+
+function toggleSheetItem(itemId: string) {
+  selectedSheetItemIds.value = selectedSheetItemIds.value.includes(itemId)
+    ? selectedSheetItemIds.value.filter((id) => id !== itemId)
+    : [...selectedSheetItemIds.value, itemId];
+}
+
+function moveSelectedItem(index: number, delta: number) {
+  const target = index + delta;
+  const items = [...selectedSheetItemIds.value];
+  if (target < 0 || target >= items.length) return;
+  [items[index], items[target]] = [items[target], items[index]];
+  selectedSheetItemIds.value = items;
+}
+
+function removeSelectedItem(index: number) {
+  selectedSheetItemIds.value = selectedSheetItemIds.value.filter((_, itemIndex) => itemIndex !== index);
+}
+
+function saveSheetAndBack() {
+  const name = sheetName.value.trim();
+  if (!name) {
+    notify('请先填写练习单名称');
+    return;
+  }
+  if (!selectedSheetItems.value.length) {
+    notify('请至少勾选一个句子');
+    return;
+  }
+  const now = new Date().toISOString();
+  const existing = editingSheet.value;
+  const sheet: PracticeSheet = {
+    id: existing?.id ?? `sheet-${Date.now()}`,
+    name,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    items: selectedSheetItems.value
+  };
+  savePracticeSheet(sheet);
+  persist();
+  view.value = state.role === 'teacher' ? 'teacher' : 'library';
+  notify(existing ? '专项练习单已更新' : '专项练习单已创建');
+}
+
+function removeSheet(sheet: PracticeSheet) {
+  if (!window.confirm(`撤掉“${sheet.name}”只会删除这份练习单的草稿和提交结果，原课程记录不会受影响。继续吗？`)) return;
+  deletePracticeSheet(sheet.id);
+  persist();
+  notify('练习单及其作答已移除');
+}
+
 function startLesson(lesson: Lesson) {
   const progress = state.progress[lesson.id] ?? { answers: {}, activeSentenceId: lesson.sentences[0].id, updatedAt: new Date().toISOString() };
   state.progress[lesson.id] = progress;
   state.activeLessonId = lesson.id;
+  state.activeSheetId = isPracticeSheetLessonId(lesson.id)
+    ? lesson.id.slice(practiceSheetLessonId('').length)
+    : '';
   state.activeSentenceId = progress.activeSentenceId || lesson.sentences[0].id;
   currentAnswer.value = progress.answers[state.activeSentenceId] ?? '';
   view.value = 'practice';
   persist();
+}
+
+function startPracticeSheet(sheet: PracticeSheet) {
+  startLesson(lessonById(practiceSheetLessonId(sheet.id))!);
 }
 
 function goToSentence(index: number) {
@@ -126,11 +231,23 @@ function submitLesson() {
     const answer = progress?.answers[sentence.id] ?? '';
     const tokens = compareSentence(source, answer);
     const correct = tokens.filter((token) => token.correct).length;
-    return { sentenceId: sentence.id, source, answer, tokens, score: tokens.length ? Math.round((correct / tokens.length) * 100) : 0 };
+    const sheetItem = isActivePracticeSheet.value
+      ? activePracticeSheet.value?.items.find((item) => item.id === sentence.id)
+      : undefined;
+    return {
+      sentenceId: sentence.id,
+      originalSentenceId: sheetItem?.sentenceId,
+      practiceSheetItemId: sheetItem?.id,
+      source,
+      answer,
+      tokens,
+      score: tokens.length ? Math.round((correct / tokens.length) * 100) : 0
+    };
   });
   const attempt: PracticeAttempt = {
     id: `attempt-${Date.now()}`,
     lessonId: lesson.id,
+    practiceSheetId: isActivePracticeSheet.value ? state.activeSheetId : undefined,
     lessonTitle: lesson.title,
     courseTitle: course.title,
     submittedAt: new Date().toISOString(),
@@ -291,22 +408,88 @@ onBeforeUnmount(() => {
           </div>
         </article>
 
+        <div class="section-head">
+          <h3>专项练习单</h3>
+          <var-button size="small" type="primary" variant="outline" @click="startNewSheet">新建练习单</var-button>
+        </div>
+        <article v-if="state.practiceSheets.length" class="panel sheet-panel">
+          <div v-for="sheet in state.practiceSheets" :key="sheet.id" class="sheet-card">
+            <div class="sheet-summary">
+              <strong>{{ sheet.name }}</strong>
+              <p>{{ sheet.items.length }} 句 · 更新于 {{ formatDate(sheet.updatedAt) }}</p>
+            </div>
+            <div class="sheet-actions">
+              <var-button size="small" variant="outline" @click="editSheet(sheet)">编辑</var-button>
+              <var-button size="small" variant="outline" @click="removeSheet(sheet)">撤掉</var-button>
+              <var-button size="small" type="primary" @click="startPracticeSheet(sheet)">开始</var-button>
+            </div>
+          </div>
+        </article>
+        <div v-else class="panel empty-state compact">
+          <strong>还没有专项练习单</strong>
+          从课程库勾选常错句，调整顺序后即可逐句听写。
+        </div>
+
         <div class="section-head"><h3>最近练习</h3><span>{{ state.attempts.length }} 条记录</span></div>
         <article v-if="state.attempts.length" class="panel">
           <div v-for="attempt in state.attempts.slice(0, 4)" :key="attempt.id" class="history-card">
             <div class="history-top"><strong>{{ attempt.lessonTitle }}</strong><span class="history-score">{{ attempt.score }} 分</span></div>
-            <p>{{ formatDate(attempt.submittedAt) }} · {{ attempt.teacherFeedback || '暂无教师反馈' }}</p>
+            <p>{{ attempt.practiceSheetId ? '专项练习单 · ' : '' }}{{ formatDate(attempt.submittedAt) }} · {{ attempt.teacherFeedback || '暂无教师反馈' }}</p>
           </div>
           <var-button block type="primary" variant="outline" @click="downloadRecords">导出全部练习记录</var-button>
         </article>
         <div v-else class="empty-state"><strong>还没有练习记录</strong>完成一次听写后，可在这里复核和导出。</div>
       </div>
 
+      <div v-else-if="view === 'sheet-editor'" class="page">
+        <header class="topbar">
+          <button class="back-button" :aria-label="state.role === 'teacher' ? '返回教师视图' : '返回课程库'" @click="view = state.role === 'teacher' ? 'teacher' : 'library'">‹</button>
+          <div class="brand"><div class="brand-mark">专</div><div><h1>专项练习单</h1><p>勾选句子、调整顺序并命名</p></div></div>
+        </header>
+
+        <section class="panel">
+          <div class="dictation-label"><strong>练习单名称</strong><span>仅保存在本机</span></div>
+          <input v-model="sheetName" class="sheet-name-input" placeholder="例如：机场高频错句复习" aria-label="练习单名称" />
+          <div class="selected-count">已选 {{ selectedSheetItemIds.length }} 句</div>
+        </section>
+
+        <section v-if="selectedSheetItems.length" class="panel">
+          <div class="dictation-label"><strong>听写顺序</strong><span>开始后按此顺序播放</span></div>
+          <div v-for="(item, index) in selectedSheetItems" :key="item.id" class="selected-sentence-row">
+            <span class="order-number">{{ index + 1 }}</span>
+            <div class="selected-sentence-text">
+              <strong>{{ item.text }}</strong>
+              <p>{{ sheetCandidates.find((candidate) => candidate.itemId === item.id)?.course.title ?? '课程库' }}</p>
+            </div>
+            <div class="order-actions">
+              <button aria-label="上移" :disabled="index === 0" @click="moveSelectedItem(index, -1)">↑</button>
+              <button aria-label="下移" :disabled="index === selectedSheetItems.length - 1" @click="moveSelectedItem(index, 1)">↓</button>
+              <button aria-label="移除该句" @click="removeSelectedItem(index)">×</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="section-head"><h3>从课程库勾选</h3><span>同一句可分别加入不同练习单</span></div>
+        <article v-for="course in state.courses" :key="course.id" class="course-card">
+          <div class="course-title"><div><h3>{{ course.title }}</h3><p>{{ course.description }}</p></div></div>
+          <div v-for="lesson in course.lessons" :key="lesson.id" class="candidate-lesson">
+            <h4>{{ lesson.title }}</h4>
+            <label v-for="candidate in sheetCandidates.filter((item) => item.lesson.id === lesson.id)" :key="candidate.itemId" class="candidate-row">
+              <input type="checkbox" :checked="selectedSheetItemIds.includes(candidate.itemId)" @change="toggleSheetItem(candidate.itemId)" />
+              <span><strong>{{ candidate.sentence.text }}</strong><small>{{ candidate.sentence.translation }}</small></span>
+            </label>
+          </div>
+        </article>
+
+        <var-button block type="primary" @click="saveSheetAndBack">保存练习单</var-button>
+        <var-button block type="default" variant="outline" style="margin-top: 10px" @click="view = state.role === 'teacher' ? 'teacher' : 'library'">取消</var-button>
+      </div>
+
       <div v-else-if="view === 'practice' && activeLesson" class="page">
         <header class="practice-header">
           <div class="practice-nav">
             <button class="back-button" aria-label="返回课程库" @click="view = 'library'">‹</button>
-            <div><h2>{{ activeLesson.title }}</h2></div>
+            <div><h2>{{ activeLesson.title }}</h2><p v-if="isActivePracticeSheet" class="practice-subtitle">专项练习单</p></div>
             <span class="status-chip">{{ online ? '在线' : '离线' }}</span>
           </div>
           <div class="progress-line">
@@ -349,7 +532,7 @@ onBeforeUnmount(() => {
         <section class="panel result-score">
           <div class="score-ring" :style="{ '--score': `${resultAttempt.score}%` }"><strong>{{ resultAttempt.score }}</strong></div>
           <h2>{{ resultAttempt.score >= 90 ? '几乎完美' : resultAttempt.score >= 70 ? '继续打磨细节' : '再听一遍会更好' }}</h2>
-          <p>{{ resultAttempt.lessonTitle }} · 点击红色词可单独重听，并记录错误原因。</p>
+          <p>{{ resultAttempt.practiceSheetId ? '专项练习单' : resultAttempt.lessonTitle }} · 点击红色词可单独重听，并记录错误原因。</p>
         </section>
 
         <div class="sentence-picker">
@@ -391,7 +574,7 @@ onBeforeUnmount(() => {
         </section>
 
         <section v-if="resultAttempt.teacherFeedback" class="panel"><div class="feedback-card"><strong>教师反馈</strong><p>{{ resultAttempt.teacherFeedback }}</p></div></section>
-        <var-button block type="primary" @click="startLesson(activeLesson!)">返回本次课程</var-button>
+        <var-button block type="primary" @click="activeLesson && startLesson(activeLesson)">返回本次{{ resultAttempt.practiceSheetId ? '练习单' : '课程' }}</var-button>
         <var-button block type="default" variant="outline" style="margin-top: 10px" @click="downloadRecords">导出练习记录</var-button>
       </div>
 
@@ -401,10 +584,26 @@ onBeforeUnmount(() => {
           <div class="brand"><div class="brand-mark">T</div><div><h1>教师复核</h1><p>查看作答并写入反馈</p></div></div>
         </header>
 
+        <section class="panel">
+          <div class="dictation-label"><strong>专项复习</strong><span>{{ state.practiceSheets.length }} 份练习单</span></div>
+          <var-button block type="primary" variant="outline" @click="startNewSheet">新建专项练习单</var-button>
+          <div v-for="sheet in state.practiceSheets" :key="sheet.id" class="sheet-card">
+            <div class="sheet-summary">
+              <strong>{{ sheet.name }}</strong>
+              <p>{{ sheet.items.length }} 句 · 更新于 {{ formatDate(sheet.updatedAt) }}</p>
+            </div>
+            <div class="sheet-actions">
+              <var-button size="small" variant="outline" @click="editSheet(sheet)">编辑</var-button>
+              <var-button size="small" variant="outline" @click="removeSheet(sheet)">撤掉</var-button>
+              <var-button size="small" type="primary" @click="startPracticeSheet(sheet)">开始</var-button>
+            </div>
+          </div>
+        </section>
+
         <div v-if="state.attempts.length" class="panel">
           <div class="dictation-label"><strong>选择一次作答</strong><span>{{ state.attempts.length }} 条</span></div>
           <var-select v-model="teacherAttemptId" placeholder="选择作答">
-            <var-option v-for="attempt in state.attempts" :key="attempt.id" :label="`${attempt.lessonTitle} · ${attempt.score} 分 · ${formatDate(attempt.submittedAt)}`" :value="attempt.id" />
+            <var-option v-for="attempt in state.attempts" :key="attempt.id" :label="`${attempt.practiceSheetId ? '专项 · ' : ''}${attempt.lessonTitle} · ${attempt.score} 分 · ${formatDate(attempt.submittedAt)}`" :value="attempt.id" />
           </var-select>
           <template v-if="teacherAttempt">
             <div class="feedback-card"><strong>{{ teacherAttempt.courseTitle }}</strong><p>{{ teacherAttempt.lessonTitle }} · 总分 {{ teacherAttempt.score }}，完成 {{ teacherAttempt.sentenceAttempts.length }} 句。</p></div>
